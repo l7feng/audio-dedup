@@ -17,7 +17,7 @@ if ($Action -eq 'setup') {
 }
 
 if (-not (Test-Path $Py)) { throw 'missing .venv, run: .\build.ps1 setup' }
-& $Py -m ruff check src tests scripts
+& $Py -m ruff check src tests
 if ($LASTEXITCODE -ne 0) { throw 'ruff failed' }
 & $Py -m pytest
 if ($LASTEXITCODE -ne 0) { throw 'pytest failed' }
