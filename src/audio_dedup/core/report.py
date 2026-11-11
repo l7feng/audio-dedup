@@ -21,6 +21,10 @@ def _fmt_dur(d):
     return f"{d:.2f}s" if d is not None else "—"
 
 
+def _fmt_ber(b):
+    return f"{b:.3f}" if b is not None else "—"
+
+
 def write_reports(workdir: str, root: str, counts: dict, errors: list,
                   groups_l1: list, groups_l2: list, skipped_l2: bool,
                   groups_l3: list | None = None):
@@ -71,16 +75,18 @@ def write_reports(workdir: str, root: str, counts: dict, errors: list,
             gid += 1
             recs = [r for r, _b in group]
             keep = keep_suggestion(recs)
-            grade = grade_of(min(b for _r, b in group))
+            valid = [b for _r, b in group if b is not None]
+            grade = grade_of(min(valid)) if valid else "未分级"
             md.append(f"### 组 {gid}（{len(group)} 个，{grade}，建议保留 `{keep.path}`）")
             md.append("")
             md.append("| 文件 | 大小 | 时长 | 与参照 BER |")
             md.append("| --- | --- | --- | --- |")
             for r, b in sorted(group, key=lambda rb: rb[0].path):
                 mark = " ⬅ 建议保留" if r.path == keep.path else ""
-                md.append(f"| `{r.path}`{mark} | {_fmt_size(r.size)} | {_fmt_dur(r.duration)} | {b:.3f} |")
+                md.append(f"| `{r.path}`{mark} | {_fmt_size(r.size)} | {_fmt_dur(r.duration)} | {_fmt_ber(b)} |")
                 writer.writerow([gid, "L3", int(r.path == keep.path), r.path, r.size,
-                                 r.duration if r.duration is not None else "", r.sha256 or "", r.pcm_hash or "", f"{b:.4f}"])
+                                 r.duration if r.duration is not None else "", r.sha256 or "", r.pcm_hash or "",
+                                 "" if b is None else f"{b:.4f}"])
             md.append("")
     if errors:
         md.append("## 错误清单")

@@ -12,6 +12,12 @@ CREATE TABLE IF NOT EXISTS files (
     status TEXT NOT NULL DEFAULT 'new',
     error TEXT
 );
+CREATE TABLE IF NOT EXISTS l3_edges (
+    a TEXT NOT NULL,
+    b TEXT NOT NULL,
+    ber REAL NOT NULL,
+    PRIMARY KEY (a, b)
+);
 """
 
 
@@ -57,13 +63,45 @@ class Store:
         # L3 失败不改 status：文件仍是 L1/L2 的 ok 行，只拉黑指纹环节
         self.conn.execute("UPDATE files SET fp_error=? WHERE path=?", (error, path))
 
+    _UPSERT_EDGE = (
+        "INSERT INTO l3_edges(a,b,ber) VALUES(?,?,?) "
+        "ON CONFLICT(a,b) DO UPDATE SET ber=excluded.ber "
+        "WHERE excluded.ber < l3_edges.ber"
+    )
+
+    def append_l3_edge(self, a: str, b: str, ber: float):
+        """match 的 edge_sink 落库入口：边算边写、中断不丢；同一对保留更优 BER。"""
+        self.conn.execute(self._UPSERT_EDGE, (a, b, ber))
+
+    def clear_l3_edges(self):
+        self.conn.execute("DELETE FROM l3_edges")
+
+    def save_l3_edges(self, edges: list, replace: bool = True):
+        """整批写入；replace=False 时增量追加，不覆盖既有边。"""
+        if replace:
+            self.clear_l3_edges()
+        self.conn.executemany(self._UPSERT_EDGE, edges)
+
+    def load_l3_edges(self):
+        return self.conn.execute("SELECT a, b, ber FROM l3_edges").fetchall()
+
+    def mark_quarantined(self, paths: list):
+        self.conn.executemany(
+            "UPDATE files SET status='quarantined' WHERE path=?", [(p,) for p in paths])
+
+    def mark_restored(self, paths: list):
+        self.conn.executemany(
+            "UPDATE files SET status='ok' WHERE path=? AND status='quarantined'",
+            [(p,) for p in paths])
+
     def set_error(self, path: str, stage: str, error: str):
         self.conn.execute(
             "UPDATE files SET status='error', error=? WHERE path=?", (f"{stage}: {error}", path)
         )
 
     def mark_missing(self, live_paths: set):
-        rows = self.conn.execute("SELECT path FROM files WHERE status!='missing'").fetchall()
+        rows = self.conn.execute(
+            "SELECT path FROM files WHERE status NOT IN ('missing','quarantined')").fetchall()
         gone = [r["path"] for r in rows if r["path"] not in live_paths]
         self.conn.executemany(
             "UPDATE files SET status='missing' WHERE path=?", [(p,) for p in gone]

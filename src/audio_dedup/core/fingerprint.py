@@ -181,14 +181,58 @@ def _profiles(entries):
     return prof / np.maximum(norms, 1e-9)
 
 
+def groups_from_edges(paths: list, edges: list) -> list:
+    """edges: [(path_a, path_b, ber)] → 连通分量分组 [(path, ber_to_first)]。
+
+    传递连通但无直连边的成员 BER 为 None（GUI 显示「—」），不伪造数值。
+    """
+    idx = {p: i for i, p in enumerate(paths)}
+    parent = list(range(len(paths)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    direct = {}
+    for a, b, ber in edges:
+        if a not in idx or b not in idx:
+            continue
+        i, k = idx[a], idx[b]
+        direct[(min(i, k), max(i, k))] = ber
+        ri, rk = find(i), find(k)
+        if ri != rk:
+            parent[ri] = rk
+    comps: dict[int, list] = {}
+    for i in range(len(paths)):
+        comps.setdefault(find(i), []).append(i)
+    groups = []
+    for members in comps.values():
+        if len(members) < 2:
+            continue
+        rep = members[0]
+        group = [(paths[rep], 0.0)]
+        for i in members[1:]:
+            group.append((paths[i], direct.get((min(rep, i), max(rep, i)))))
+        groups.append(group)
+    groups.sort(key=lambda g: (-len(g), g[0][0]))
+    return groups
+
+
 def match(entries: list, threshold: float = GRADE_LOW, min_votes: int = 2,
           top_k: int = 12, bucket_cap: int = 1000, progress=None,
-          fallback_top: int = 8, profile_cos: float = 0.90) -> list:
+          fallback_top: int = 8, profile_cos: float = 0.90,
+          return_edges: bool = False, edge_sink=None):
     """entries: [(path, sig, mask)]。倒排索引投票 → BER 验证 → 频带直方图兜底 → 连通分量。
 
     投票抓精确/近精确对齐（增益、转码、慢变素材裁剪）；快速瞬态的分数帧偏移裁剪
     精确票为零，由直方图余弦 ≥ profile_cos 且长度比 ∈ [0.7, 1.43] 的兜底候选补抓。
     返回 [[(path, ber_to_first), ...], ...]；组内首成员为 BER 参照。
+
+    edge_sink(a, b, ber) 在每条边**首次确认时立即回调**：调用方可边算边落库或边导出，
+    不必等全库匹配结束，中断也已导出的边不会丢。return_edges 保留向后兼容，
+    返回的边列表与 sink 收到的内容一致。
     """
     entries = [(p, s, m) for p, s, m in entries if len(s) >= MIN_FRAMES]
     index: dict[int, list] = {}
@@ -205,6 +249,16 @@ def match(entries: list, threshold: float = GRADE_LOW, min_votes: int = 2,
         del index[h]  # 超高频哈希（静音/恒定音）无判别力，整桶丢弃
 
     edges = {}
+
+    def emit(i: int, k: int, ber_value: float):
+        """边首次确认即导出；同一对不重复回调。"""
+        key = (i, k)
+        if key in edges:
+            return
+        edges[key] = ber_value
+        if edge_sink is not None:
+            edge_sink(entries[i][0], entries[k][0], ber_value)
+
     for i, (_p, sig, mask) in enumerate(entries):
         votes: dict[tuple, int] = {}
         for j in np.nonzero(mask)[0]:
@@ -223,7 +277,7 @@ def match(entries: list, threshold: float = GRADE_LOW, min_votes: int = 2,
         for k, (off, _n) in sorted(best_off.items(), key=lambda kv: -kv[1][1])[:top_k]:
             b = ber_at_offset((sig, mask), (entries[k][1], entries[k][2]), off)
             if b <= threshold:
-                edges[(i, k)] = b
+                emit(i, k, b)
         if progress and i % 500 == 0:
             progress(i, len(entries))
 
@@ -250,7 +304,7 @@ def match(entries: list, threshold: float = GRADE_LOW, min_votes: int = 2,
                 b = ber((entries[i][1], entries[i][2]),
                         (entries[k][1], entries[k][2]), max_shift=shift)
                 if b <= threshold:
-                    edges[(i, k)] = b
+                    emit(i, k, b)
         if progress:
             progress(stop, n)
     if progress:
@@ -287,4 +341,7 @@ def match(entries: list, threshold: float = GRADE_LOW, min_votes: int = 2,
             group.append((entries[i][0], b))
         groups.append(group)
     groups.sort(key=lambda g: (-len(g), g[0][0]))
+    if return_edges:
+        edge_list = [(entries[i][0], entries[k][0], b) for (i, k), b in edges.items()]
+        return groups, edge_list
     return groups

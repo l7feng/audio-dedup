@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import __version__
-from .core import audio, dedup, fingerprint, report, scan, store
+from .core import audio, dedup, export, fingerprint, report, scan, store
 from .core.hashing import sha256_file
 from .core.paths import ext_of
 
@@ -135,7 +135,10 @@ def cmd_scan(args) -> int:
 
         counts = db.counts()
         n_groups = report.write_reports(workdir, root, counts, errors, groups_l1, groups_l2, args.skip_l2)
-        print(f"报告：{os.path.join(workdir, 'report.md')} / report.csv；共 {n_groups} 组；耗时 {time.time() - started:.0f}s", flush=True)
+        payload = export.export_workdir(workdir, root, db)
+        print(f"报告：{os.path.join(workdir, 'report.md')} / report.csv；共 {n_groups} 组；"
+              f"GUI 数据包 groups.json（边 {payload['summary']['edges']} 条）＋edges.csv 已导出；"
+              f"耗时 {time.time() - started:.0f}s", flush=True)
         return 0
     finally:
         db.close()
@@ -148,15 +151,9 @@ def _recs_from_db(db):
             for r in db.ok_rows()]
 
 
-def _l3_groups(db, threshold):
-    by_path = {r.path: r for r in _recs_from_db(db)}
-    entries = []
-    for row in db.ok_rows():
-        if row["fp"]:
-            sig, mask = fingerprint.unpack_fp(row["fp"])
-            entries.append((row["path"], sig, mask))
-    groups = fingerprint.match(entries, threshold=threshold)
-    return [[(by_path[p], b) for p, b in g if p in by_path] for g in groups]
+def _groups_from_index(db):
+    """三层分组统一从既有索引＋已导出的边重建，绝不重算指纹。"""
+    return export.rebuild_groups(db)
 
 
 def cmd_l3(args) -> int:
@@ -194,12 +191,35 @@ def cmd_l3(args) -> int:
                     _progress(done, f"fp done ({failed} failed)", "L3")
         db.commit()
 
-        groups_l3 = _l3_groups(db, args.threshold)
-        recs = _recs_from_db(db)
+        entries = []
+        for row in db.ok_rows():
+            if row["fp"]:
+                sig, mask = fingerprint.unpack_fp(row["fp"])
+                entries.append((row["path"], sig, mask))
+        if args.reset_edges:
+            db.clear_l3_edges()
+            db.commit()
+        emitted = {"n": 0}
+
+        def edge_sink(a, b, ber):
+            """边算边导出：每确认一条相似边立即落库，中断不丢已导出的边。"""
+            db.append_l3_edge(a, b, ber)
+            emitted["n"] += 1
+            if emitted["n"] % 200 == 0:
+                db.commit()
+                _progress(emitted["n"], "edges exported", "L3")
+
+        fingerprint.match(entries, threshold=args.threshold,
+                          edge_sink=edge_sink,
+                          progress=lambda d, t: _progress(d, f"/ {t} matched", "L3"))
+        db.commit()
+        l1, l2, l3, edges = export.rebuild_groups(db)
+        payload = export.export_workdir(workdir, args.root or "(见索引)", db)
         n = report.write_reports(workdir, args.root or "(见索引)", db.counts(), errors,
-                                 dedup.l1_groups(recs), dedup.l2_groups(recs), False,
-                                 groups_l3=groups_l3)
-        print(f"L3 完成：疑似组 {len(groups_l3)}，指纹失败 {failed}；报告共 {n} 组；"
+                                 l1, l2, False, groups_l3=l3)
+        print(f"L3 完成：疑似组 {len(l3)}，边 {len(edges)} 条（本次新确认 {emitted['n']}），"
+              f"指纹失败 {failed}；报告共 {n} 组；"
+              f"GUI 数据包 {payload['summary']['groups']} 组已导出；"
               f"耗时 {time.time() - started:.0f}s", flush=True)
         return 0
     finally:
@@ -212,14 +232,28 @@ def cmd_report(args) -> int:
     workdir = os.path.abspath(args.workdir)
     db = store.Store(os.path.join(workdir, "index.sqlite3"))
     try:
-        recs = [dedup.FileRec(**{k: r[k] for k in ("path", "size", "mtime_ns", "sha256", "duration", "pcm_hash")})
-                for r in db.ok_rows()]
+        l1, l2, l3, edges = _groups_from_index(db)
         errors = [f"{r['path']}: {r['error']}" for r in db.conn.execute(
             "SELECT path, error FROM files WHERE status='error'").fetchall()]
         n = report.write_reports(workdir, args.root or "(见索引)", db.counts(), errors,
-                                 dedup.l1_groups(recs), dedup.l2_groups(recs), False,
-                                 groups_l3=_l3_groups(db, fingerprint.GRADE_LOW))
-        print(f"报告重写完成：{n} 组", flush=True)
+                                 l1, l2, False, groups_l3=l3)
+        export.export_workdir(workdir, args.root or "(见索引)", db)
+        print(f"报告重写完成：{n} 组；边 {len(edges)} 条；GUI 数据包已刷新", flush=True)
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_export(args) -> int:
+    """只从既有索引导出 GUI 数据包，不重算指纹、不重写报告。"""
+    workdir = os.path.abspath(args.workdir)
+    db = store.Store(os.path.join(workdir, "index.sqlite3"))
+    try:
+        payload = export.export_workdir(workdir, args.root or "(见索引)", db)
+        s = payload["summary"]
+        print(f"导出完成：{os.path.join(workdir, export.GROUPS_JSON)} / "
+              f"{os.path.join(workdir, export.EDGES_CSV)}；"
+              f"{s['groups']} 组、{s['edges']} 条边", flush=True)
         return 0
     finally:
         db.close()
@@ -244,11 +278,17 @@ def main(argv=None) -> int:
     p_l3.add_argument("--threshold", type=float, default=fingerprint.GRADE_LOW,
                       help="疑似 BER 上限（默认 0.35）")
     p_l3.add_argument("--workers", type=int, default=4, help="解码线程数（默认 4）")
+    p_l3.add_argument("--reset-edges", action="store_true",
+                      help="清空已导出的边再重建（默认增量：中断续跑、保留更优 BER）")
     p_l3.set_defaults(func=cmd_l3)
     p_report = sub.add_parser("report", help="从既有索引重写报告")
     p_report.add_argument("--workdir", required=True)
     p_report.add_argument("--root", default=None)
     p_report.set_defaults(func=cmd_report)
+    p_export = sub.add_parser("export", help="导出 GUI 数据包 groups.json / edges.csv（不重算）")
+    p_export.add_argument("--workdir", required=True)
+    p_export.add_argument("--root", default=None)
+    p_export.set_defaults(func=cmd_export)
     args = parser.parse_args(argv)
     try:
         return args.func(args)
