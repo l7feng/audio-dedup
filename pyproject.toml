@@ -7,7 +7,7 @@ name = "audio-dedup"
 dynamic = ["version"]
 description = "Sound effects library duplicate finder: byte / decoded-audio / perceptual layers"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["numpy>=2"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]

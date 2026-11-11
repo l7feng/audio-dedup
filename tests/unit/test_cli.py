@@ -79,3 +79,29 @@ def test_single_instance_lock(tmp_path):
         first.close()
     second = SingleInstance(lock_path)
     second.close()
+
+
+def test_l3_groups_and_readonly(tmp_path, library):
+    before = _hashes(library)
+    wd = tmp_path / "wd"
+    assert main(["scan", "--root", str(library), "--workdir", str(wd)]) == 0
+    assert main(["l3", "--workdir", str(wd), "--root", str(library)]) == 0
+    assert _hashes(library) == before
+
+    with open(wd / "report.csv", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    l3 = [r for r in rows if r["layer"] == "L3"]
+    names = {os.path.basename(r["path"]) for r in l3}
+    assert {"a.wav", "a_meta.wav", "a.flac"} <= names
+    assert "b.wav" not in names and "garbage.wav" not in names
+    assert all(r["ber"] for r in l3)
+
+
+def test_l3_rescan_reuse(tmp_path, library, capsys):
+    wd = tmp_path / "wd"
+    assert main(["scan", "--root", str(library), "--workdir", str(wd)]) == 0
+    assert main(["l3", "--workdir", str(wd)]) == 0
+    capsys.readouterr()
+    assert main(["l3", "--workdir", str(wd)]) == 0
+    out = capsys.readouterr().out
+    assert "待算指纹 0" in out

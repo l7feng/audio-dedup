@@ -22,6 +22,10 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(files)")}
+        if "fp" not in cols:
+            self.conn.execute("ALTER TABLE files ADD COLUMN fp BLOB")
+            self.conn.execute("ALTER TABLE files ADD COLUMN fp_error TEXT")
         self.conn.commit()
 
     def get(self, path: str):
@@ -31,7 +35,7 @@ class Store:
         self.conn.execute(
             "INSERT INTO files(path,size,mtime_ns,status) VALUES(?,?,?,'new') "
             "ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, "
-            "sha256=NULL, duration=NULL, pcm_hash=NULL, status='new', error=NULL",
+            "sha256=NULL, duration=NULL, pcm_hash=NULL, fp=NULL, fp_error=NULL, status='new', error=NULL",
             (path, size, mtime_ns),
         )
 
@@ -45,6 +49,13 @@ class Store:
 
     def set_pcm(self, path: str, pcm_hash: str):
         self.conn.execute("UPDATE files SET pcm_hash=? WHERE path=?", (pcm_hash, path))
+
+    def set_fp(self, path: str, fp: bytes):
+        self.conn.execute("UPDATE files SET fp=?, fp_error=NULL WHERE path=?", (fp, path))
+
+    def set_fp_error(self, path: str, error: str):
+        # L3 失败不改 status：文件仍是 L1/L2 的 ok 行，只拉黑指纹环节
+        self.conn.execute("UPDATE files SET fp_error=? WHERE path=?", (error, path))
 
     def set_error(self, path: str, stage: str, error: str):
         self.conn.execute(

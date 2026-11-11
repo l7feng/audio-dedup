@@ -3,9 +3,10 @@ import os
 import shutil
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from . import __version__
-from .core import audio, dedup, report, scan, store
+from .core import audio, dedup, fingerprint, report, scan, store
 from .core.hashing import sha256_file
 from .core.paths import ext_of
 
@@ -142,6 +143,71 @@ def cmd_scan(args) -> int:
             lock.close()
 
 
+def _recs_from_db(db):
+    return [dedup.FileRec(**{k: r[k] for k in ("path", "size", "mtime_ns", "sha256", "duration", "pcm_hash")})
+            for r in db.ok_rows()]
+
+
+def _l3_groups(db, threshold):
+    by_path = {r.path: r for r in _recs_from_db(db)}
+    entries = []
+    for row in db.ok_rows():
+        if row["fp"]:
+            sig, mask = fingerprint.unpack_fp(row["fp"])
+            entries.append((row["path"], sig, mask))
+    groups = fingerprint.match(entries, threshold=threshold)
+    return [[(by_path[p], b) for p, b in g if p in by_path] for g in groups]
+
+
+def cmd_l3(args) -> int:
+    workdir = os.path.abspath(args.workdir)
+    lock = SingleInstance(os.path.join(workdir, ".lock")) if SingleInstance else None
+    db = store.Store(os.path.join(workdir, "index.sqlite3"))
+    started = time.time()
+    errors = []
+    try:
+        rows = db.ok_rows()
+        todo = [r for r in rows if r["fp"] is None and not r["fp_error"]]
+        blacklisted = sum(1 for r in rows if r["fp_error"])
+        print(f"L3：待算指纹 {len(todo)}，黑名单跳过 {blacklisted}", flush=True)
+
+        def work(row):
+            try:
+                pcm = fingerprint.decode_pcm(row["path"], args.ffmpeg)
+                sig, mask = fingerprint.signature(pcm)
+                return row["path"], fingerprint.pack_fp(sig, mask), None
+            except (audio.AudioError, OSError) as e:
+                return row["path"], None, str(e)
+
+        done = failed = 0
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            for path, blob, err in ex.map(work, todo):
+                if err is None:
+                    db.set_fp(path, blob)
+                else:
+                    db.set_fp_error(path, err)
+                    errors.append(f"{path}: fp: {err}")
+                    failed += 1
+                done += 1
+                if done % 500 == 0:
+                    db.commit()
+                    _progress(done, f"fp done ({failed} failed)", "L3")
+        db.commit()
+
+        groups_l3 = _l3_groups(db, args.threshold)
+        recs = _recs_from_db(db)
+        n = report.write_reports(workdir, args.root or "(见索引)", db.counts(), errors,
+                                 dedup.l1_groups(recs), dedup.l2_groups(recs), False,
+                                 groups_l3=groups_l3)
+        print(f"L3 完成：疑似组 {len(groups_l3)}，指纹失败 {failed}；报告共 {n} 组；"
+              f"耗时 {time.time() - started:.0f}s", flush=True)
+        return 0
+    finally:
+        db.close()
+        if lock:
+            lock.close()
+
+
 def cmd_report(args) -> int:
     workdir = os.path.abspath(args.workdir)
     db = store.Store(os.path.join(workdir, "index.sqlite3"))
@@ -151,7 +217,8 @@ def cmd_report(args) -> int:
         errors = [f"{r['path']}: {r['error']}" for r in db.conn.execute(
             "SELECT path, error FROM files WHERE status='error'").fetchall()]
         n = report.write_reports(workdir, args.root or "(见索引)", db.counts(), errors,
-                                 dedup.l1_groups(recs), dedup.l2_groups(recs), False)
+                                 dedup.l1_groups(recs), dedup.l2_groups(recs), False,
+                                 groups_l3=_l3_groups(db, fingerprint.GRADE_LOW))
         print(f"报告重写完成：{n} 组", flush=True)
         return 0
     finally:
@@ -170,6 +237,14 @@ def main(argv=None) -> int:
     p_scan.add_argument("--ffmpeg", default="ffmpeg")
     p_scan.add_argument("--ffprobe", default="ffprobe")
     p_scan.set_defaults(func=cmd_scan)
+    p_l3 = sub.add_parser("l3", help="L3 感知疑似指纹（只读；疑似组须人工裁决，不自动处置）")
+    p_l3.add_argument("--workdir", required=True)
+    p_l3.add_argument("--root", default=None, help="报告展示的扫描根（可选）")
+    p_l3.add_argument("--ffmpeg", default="ffmpeg")
+    p_l3.add_argument("--threshold", type=float, default=fingerprint.GRADE_LOW,
+                      help="疑似 BER 上限（默认 0.35）")
+    p_l3.add_argument("--workers", type=int, default=4, help="解码线程数（默认 4）")
+    p_l3.set_defaults(func=cmd_l3)
     p_report = sub.add_parser("report", help="从既有索引重写报告")
     p_report.add_argument("--workdir", required=True)
     p_report.add_argument("--root", default=None)

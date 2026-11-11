@@ -22,10 +22,14 @@ def _fmt_dur(d):
 
 
 def write_reports(workdir: str, root: str, counts: dict, errors: list,
-                  groups_l1: list, groups_l2: list, skipped_l2: bool):
+                  groups_l1: list, groups_l2: list, skipped_l2: bool,
+                  groups_l3: list | None = None):
+    from .fingerprint import grade_of
+
+    groups_l3 = groups_l3 or []
     csv_buf = io.StringIO()
     writer = csv.writer(csv_buf)
-    writer.writerow(["group_id", "layer", "keep_suggestion", "path", "size_bytes", "duration_s", "sha256", "pcm_hash"])
+    writer.writerow(["group_id", "layer", "keep_suggestion", "path", "size_bytes", "duration_s", "sha256", "pcm_hash", "ber"])
     md = [
         "# 音频重复扫描报告",
         "",
@@ -33,10 +37,12 @@ def write_reports(workdir: str, root: str, counts: dict, errors: list,
         f"- 时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 文件状态：{counts}",
         f"- L1 字节级重复组：{len(groups_l1)}；L2 音频级重复组：{len(groups_l2)}"
-        + ("（本次跳过 L2）" if skipped_l2 else ""),
+        + ("（本次跳过 L2）" if skipped_l2 else "")
+        + f"；L3 感知疑似组：{len(groups_l3)}",
         f"- 扫描/解码错误：{len(errors)} 条（坏文件黑名单，mtime+size 不变则复扫跳过）",
         "",
         "> L1/L2 为确定重复；保留建议按 无损优先 → 码率优先 → 路径短优先。本报告不移动任何文件。",
+        "> L3 为疑似组（高/中/低分级），必须人工试听裁决，不自动处置。",
         "",
     ]
     gid = 0
@@ -56,7 +62,25 @@ def write_reports(workdir: str, root: str, counts: dict, errors: list,
                 mark = " ⬅ 建议保留" if r.path == keep.path else ""
                 md.append(f"| `{r.path}`{mark} | {_fmt_size(r.size)} | {_fmt_dur(r.duration)} |")
                 writer.writerow([gid, layer, int(r.path == keep.path), r.path, r.size,
-                                 r.duration if r.duration is not None else "", r.sha256 or "", r.pcm_hash or ""])
+                                 r.duration if r.duration is not None else "", r.sha256 or "", r.pcm_hash or "", ""])
+            md.append("")
+    if groups_l3:
+        md.append("## L3 感知疑似组（须人工试听裁决，不自动处置）")
+        md.append("")
+        for group in sorted(groups_l3, key=lambda g: (-len(g), g[0][0].path)):
+            gid += 1
+            recs = [r for r, _b in group]
+            keep = keep_suggestion(recs)
+            grade = grade_of(min(b for _r, b in group))
+            md.append(f"### 组 {gid}（{len(group)} 个，{grade}，建议保留 `{keep.path}`）")
+            md.append("")
+            md.append("| 文件 | 大小 | 时长 | 与参照 BER |")
+            md.append("| --- | --- | --- | --- |")
+            for r, b in sorted(group, key=lambda rb: rb[0].path):
+                mark = " ⬅ 建议保留" if r.path == keep.path else ""
+                md.append(f"| `{r.path}`{mark} | {_fmt_size(r.size)} | {_fmt_dur(r.duration)} | {b:.3f} |")
+                writer.writerow([gid, "L3", int(r.path == keep.path), r.path, r.size,
+                                 r.duration if r.duration is not None else "", r.sha256 or "", r.pcm_hash or "", f"{b:.4f}"])
             md.append("")
     if errors:
         md.append("## 错误清单")
