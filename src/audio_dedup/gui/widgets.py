@@ -36,6 +36,9 @@ class StatCard(QFrame):
     def set_value(self, text: str):
         self.value.setText(text)
 
+    def set_color(self, color: str):
+        self.value.setStyleSheet(f"color: {color};")
+
 
 class WaveformWidget(QWidget):
     """多轨波形：镜像包络、单色、活跃轨高亮、点击定位。
@@ -69,6 +72,7 @@ class WaveformWidget(QWidget):
 
     def set_tracks(self, tracks: list):
         self._tracks = list(tracks)
+        self._active = -1
         self._duration = max((t.get("duration") or 0.0 for t in self._tracks), default=0.0)
         self._relayout()
 
@@ -205,7 +209,7 @@ class WaveformWidget(QWidget):
             p.setPen(QColor(theme.MUTED))
             for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
                 x = r.left() + frac * r.width()
-                text = _mmss(frac * self._duration)
+                text = _tick(frac * self._duration, self._duration)
                 w = fm.horizontalAdvance(text)
                 if frac == 0.0:
                     p.drawText(QRectF(x, 4, w + 4, 14), Qt.AlignLeft | Qt.AlignVCenter, text)
@@ -226,25 +230,35 @@ class WaveformWidget(QWidget):
             active = i == self._active
             keep = bool(t.get("keep"))
             if active:
-                p.fillRect(QRectF(0, band.top(), self.width(), TRACK_H), QColor("#171d26"))
-            if keep:
-                p.fillRect(QRectF(0, band.top() + 4, 3, TRACK_H - 8), QColor(theme.ACCENT_DIM))
+                p.fillRect(QRectF(0, band.top(), self.width(), TRACK_H), QColor("#1f2733"))
+                p.setPen(QPen(QColor("#2f3946"), 1))
+                p.drawLine(QPointF(0, band.top()), QPointF(self.width(), band.top()))
+                p.drawLine(QPointF(0, band.bottom()), QPointF(self.width(), band.bottom()))
+                p.fillRect(QRectF(0, band.top(), 4, TRACK_H), QColor(theme.ACCENT))
 
             color = QColor(theme.TRACK_ACTIVE if active else theme.TRACK_IDLE)
 
-            # 序号
+            # 序号（活跃轨前加指针）
             p.setFont(mono)
             p.setPen(QColor(theme.ACCENT if active else theme.MUTED))
-            p.drawText(QRectF(12, band.top(), 20, TRACK_H),
+            p.drawText(QRectF(14, band.top(), 20, TRACK_H),
                        Qt.AlignVCenter | Qt.AlignLeft, f"{i + 1:02d}")
+
+            # 保留项：文件名前的金色圆点
+            if keep:
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(theme.ACCENT_DIM))
+                p.drawEllipse(QPointF(40, band.center().y()), 2.5, 2.5)
+                p.setBrush(Qt.NoBrush)
 
             # 文件名
             p.setFont(head_font)
             label = t.get("label", "")
             fm = QFontMetrics(head_font)
-            avail = LABEL_W - 92
+            left = 46 if keep else 40
+            avail = LABEL_W - left - 48
             p.setPen(QColor(theme.TEXT if (active or keep) else theme.TEXT_DIM))
-            p.drawText(QRectF(34, band.top(), avail, TRACK_H),
+            p.drawText(QRectF(left, band.top(), avail, TRACK_H),
                        Qt.AlignVCenter | Qt.AlignLeft,
                        fm.elidedText(label, Qt.ElideMiddle, avail))
 
@@ -296,10 +310,16 @@ class WaveformWidget(QWidget):
             bottom.append(QPointF(x, center - lo * amp))
         poly = QPolygonF(top + list(reversed(bottom)))
         fill = QColor(color)
-        fill.setAlpha(215 if active else 115)
+        fill.setAlpha(200 if active else 105)
         p.setPen(Qt.NoPen)
         p.setBrush(fill)
         p.drawPolygon(poly)
+        # 上包络描边：形状在满幅素材上也能看出起伏
+        stroke = QColor(color)
+        stroke.setAlpha(170 if active else 80)
+        p.setPen(QPen(stroke, 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawPolyline(QPolygonF(top))
         p.setPen(QPen(QColor("#252c36"), 1))
         p.drawLine(QPointF(band.left(), center), QPointF(band.right(), center))
 
@@ -317,3 +337,12 @@ def _dur(seconds) -> str:
 def _mmss(seconds: float) -> str:
     sec = max(0.0, float(seconds or 0))
     return f"{int(sec) // 60}:{int(sec) % 60:02d}"
+
+
+def _tick(seconds: float, total: float) -> str:
+    """短素材用秒（保留一位小数），长素材用 m:ss，避免 0.6 秒的文件全显示 0:00。"""
+    if total < 10:
+        return f"{seconds:.1f}s"
+    if total < 60:
+        return f"{seconds:.1f}s"
+    return _mmss(seconds)

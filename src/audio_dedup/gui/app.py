@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
 
 from ..core import quarantine
 from . import data, theme
-from .widgets import TRACK_H, StatCard, WaveformWidget
+from .widgets import PAD_TOP, TRACK_H, StatCard, WaveformWidget
 
 DEFAULT_WORKDIR = "D:/Ai-Files/Repos/audio-dedup/build/scan-20261109"
 
@@ -250,9 +250,9 @@ class MainWindow(QMainWindow):
     def _make_topbar(self):
         bar = QFrame()
         bar.setObjectName("Topbar")
-        bar.setFixedHeight(66)
+        bar.setFixedHeight(56)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(18, 8, 18, 8)
+        lay.setContentsMargins(18, 6, 18, 6)
         lay.setSpacing(10)
         title = QLabel("音频重复识别工具")
         title.setObjectName("Title")
@@ -285,12 +285,13 @@ class MainWindow(QMainWindow):
     def _make_stats(self):
         box = QWidget()
         lay = QHBoxLayout(box)
-        lay.setContentsMargins(16, 12, 16, 10)
-        lay.setSpacing(12)
+        lay.setContentsMargins(16, 8, 16, 6)
+        lay.setSpacing(10)
+        # 只有「预计可释放」上金色：它是唯一的收益指标，其余保持中性
         self.card_files = StatCard("已索引文件")
-        self.card_groups = StatCard("重复 / 疑似组", theme.ACCENT)
-        self.card_reclaim = StatCard("预计可释放", theme.L1)
-        self.card_edges = StatCard("L3 相似边", theme.L3)
+        self.card_groups = StatCard("重复 / 疑似组")
+        self.card_reclaim = StatCard("预计可释放", theme.ACCENT)
+        self.card_edges = StatCard("L3 相似边", theme.MUTED)
         for card in (self.card_files, self.card_groups, self.card_reclaim, self.card_edges):
             lay.addWidget(card)
         lay.addStretch(1)
@@ -409,7 +410,14 @@ class MainWindow(QMainWindow):
         wv.setSpacing(6)
         wsec = QLabel("波形对比 / 试听  ·  WAVEFORM & PREVIEW")
         wsec.setObjectName("SectionTitle")
-        wv.addWidget(wsec)
+        whead = QHBoxLayout()
+        whead.setSpacing(8)
+        whead.addWidget(wsec)
+        whead.addStretch(1)
+        self.wave_pos_label = QLabel("—")
+        self.wave_pos_label.setObjectName("Subtitle")
+        whead.addWidget(self.wave_pos_label)
+        wv.addLayout(whead)
         self.waveform = WaveformWidget()
         self.waveform.seekRequested.connect(self._on_wave_seek)
         self.waveform.trackSelected.connect(self._on_wave_track_selected)
@@ -431,10 +439,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.log_view, "任务日志")
         self.tabs.addTab(self.detail_view, "组详情 / 相似边")
         right.addWidget(self.tabs)
-        right.setStretchFactor(0, 3)
+        right.setStretchFactor(0, 4)
         right.setStretchFactor(1, 5)
         right.setStretchFactor(2, 2)
-        right.setSizes([300, 460, 150])
+        right.setSizes([360, 420, 120])
 
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
@@ -535,6 +543,7 @@ class MainWindow(QMainWindow):
         table.setSelectionMode(
             QAbstractItemView.ExtendedSelection if multi else QAbstractItemView.SingleSelection)
         table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(26)
         table.setShowGrid(False)
         table.setWordWrap(False)
         header = table.horizontalHeader()
@@ -635,6 +644,8 @@ class MainWindow(QMainWindow):
         self.card_groups.set_value(f"{s['groups']:,}")
         self.card_reclaim.set_value(data.fmt_size(s["reclaimable_bytes"]))
         self.card_edges.set_value(f"{s['edges']:,}")
+        # L3 边为 0 时不抢注意力，有边才上金色
+        self.card_edges.set_color(theme.ACCENT if s["edges"] else theme.MUTED)
 
     def _apply_filters(self):
         if not self.payload:
@@ -717,6 +728,7 @@ class MainWindow(QMainWindow):
         self.wave_scroll.verticalScrollBar().setValue(0)
         self._wave_paths = []
         self.file_scope_label.setText("—")
+        self._update_wave_pos()
         self._update_checked_summary()
         self._update_batch_button()
 
@@ -1009,14 +1021,35 @@ class MainWindow(QMainWindow):
             self.waveform.update()
 
     def _sync_wave_active(self):
-        """文件表当前行 → 波形活跃轨，并把它滚进可视区。"""
-        row = self.file_table.currentRow()
+        """文件表当前行 → 波形活跃轨；不在视口内就把它滚到中间。"""
         path = self._current_path()
         index = self._wave_paths.index(path) if path in self._wave_paths else -1
         self.waveform.set_active(index)
-        if index >= 0:
-            self.wave_scroll.ensureVisible(0, int((index + 1) * TRACK_H + 10), 0, 40)
-        _ = row
+        self._update_wave_pos()
+        if index < 0:
+            return
+        bar = self.wave_scroll.verticalScrollBar()
+        top = PAD_TOP + index * TRACK_H
+        view_h = self.wave_scroll.viewport().height()
+        if top >= bar.value() and top + TRACK_H <= bar.value() + view_h:
+            return  # 已经看得见就不动，避免跟着点选乱跳
+        target = top + TRACK_H // 2 - view_h // 2
+        bar.setValue(max(0, min(bar.maximum(), target)))
+
+    def _update_wave_pos(self):
+        total = self.waveform.track_count()
+        index = self.waveform.active()
+        self.wave_pos_label.setText(
+            f"第 {index + 1} / {total} 条" if index >= 0 and total else f"{total} 条")
+
+    def _select_file_row(self, row):
+        """程序性选中文件行：必须显式 scrollTo，selectRow 本身不保证滚动到可见。"""
+        if row < 0 or row >= self.file_table.rowCount():
+            return
+        self.file_table.selectRow(row)
+        item = self.file_table.item(row, F_NAME) or self.file_table.item(row, F_PATH)
+        if item is not None:
+            self.file_table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
 
     def _on_file_selected(self):
         if self._loading:
@@ -1026,12 +1059,12 @@ class MainWindow(QMainWindow):
     def _on_wave_track_selected(self, index):
         """点波形轨道 → 选中文件表对应行（反向联动）。"""
         if 0 <= index < self.file_table.rowCount() and index != self.file_table.currentRow():
-            self.file_table.selectRow(index)
+            self._select_file_row(index)
 
     def _on_wave_track_activated(self, index, seconds):
         """双击波形 → 该文件从该位置试听。"""
         if 0 <= index < self.file_table.rowCount():
-            self.file_table.selectRow(index)
+            self._select_file_row(index)
             path = self._wave_paths[index] if index < len(self._wave_paths) else ""
             self._play_path(path, True)
             if seconds > 0:
@@ -1058,6 +1091,11 @@ class MainWindow(QMainWindow):
             self._log(f"文件不可达（源盘可能未挂载）：{path}")
             self.status.showMessage(f"文件不可达：{path[:120]}")
             return
+        # 试听哪一条就选中哪一条：文件表与波形同步跟着走
+        if path in self._wave_paths:
+            index = self._wave_paths.index(path)
+            if index != self.file_table.currentRow():
+                self._select_file_row(index)
         self._current_audio = path
         if self.player.play(path):
             self.now_label.setText(data.short_name(path))
