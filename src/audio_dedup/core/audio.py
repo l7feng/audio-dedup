@@ -6,6 +6,7 @@ import threading
 import wave
 
 from .paths import io_path
+from .proc import hidden_kwargs
 
 
 class AudioError(Exception):
@@ -31,7 +32,7 @@ def probe_duration(path: str, ffprobe: str = "ffprobe", timeout: float = 60) -> 
     try:
         r = subprocess.run(
             cmd, check=False, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout,
+            errors="replace", timeout=timeout, **hidden_kwargs(),
         )
     except subprocess.TimeoutExpired as e:
         raise AudioError(f"ffprobe 超时 {timeout}s") from e
@@ -53,7 +54,7 @@ def decode_pcm_hash(path: str, ffmpeg: str = "ffmpeg", timeout: float = 600):
     timed_out = threading.Event()
     # stderr 走临时文件而非 PIPE：损坏文件可能刷大量警告，双管道同读会死锁
     with tempfile.TemporaryFile() as errf:
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf) as p:
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf, **hidden_kwargs()) as p:
             def _kill():
                 timed_out.set()
                 p.kill()

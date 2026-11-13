@@ -12,6 +12,7 @@ import numpy as np
 
 from .audio import AudioError
 from .paths import io_path
+from .proc import hidden_kwargs
 
 RATE = 8000
 FRAME = 1024
@@ -39,7 +40,7 @@ def decode_pcm(path: str, ffmpeg: str = "ffmpeg", timeout: float = 120) -> np.nd
     ]
     timed_out = threading.Event()
     with tempfile.TemporaryFile() as errf:
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf) as p:
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf, **hidden_kwargs()) as p:
             def _kill():
                 timed_out.set()
                 p.kill()

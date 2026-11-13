@@ -10,6 +10,8 @@
 - 工程：`pyproject.toml` 增加 `gui`／`dev` 可选依赖与 `audio-dedup-gui` 入口；`scripts/run-gui.ps1` 启动脚本；`build.ps1 package` 一键打包（含图标与 `assets` 数据文件）；`STRUCTURE.md` 与 `docs/adr/0002` 登记依赖方向和数据契约。
 - 验证：`ruff check` 全绿、`pytest` 45 项通过；GUI 真启动冒烟（offscreen＋系统字体）渲染真实索引 48,009 文件／6,055 组／5 轨真实波形并截图；`QMediaPlayer` 实测解码源库 mp3（duration 4349ms、position 递增、零错误）；打包版 265 文件、exe 4.57 MB，资源内嵌 `_internal/audio_dedup/gui/assets/`，`--cli --version` 分发正常。
 
+- 修复（2026-11-13）：打包版启动刷一堆黑窗。`--windowed` 的 exe 本身没有控制台，启动自动打开默认工作目录后要为组内每个文件解码波形，ffmpeg／ffprobe 是控制台程序，每被拉起一次就新建一个控制台窗口（实测启动瞬间 14 个 ffmpeg 各弹一个黑窗）。新增 `core/proc.py::hidden_kwargs()`，`audio.probe_duration`／`audio.decode_pcm_hash`／`fingerprint.decode_pcm` 统一带上 `CREATE_NO_WINDOW` 与隐藏窗口的 `STARTUPINFO`；不改命令、解码口径与统计逻辑。修复后同样 4 路并发解码波形，新建控制台 0 个，45 项测试仍全绿。
+
 ## 0.1.0 (2026-11-09)
 
 - 建仓骨架：Python src 布局（07 模板 03-Python源码卡）、STRUCTURE.md、元文件、build.ps1。
