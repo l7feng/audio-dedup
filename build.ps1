@@ -24,7 +24,7 @@ if ($Action -eq 'gui') {
 if ($Action -eq 'package') {
     if (-not (Test-Path $Py)) { throw 'missing .venv, run: .\build.ps1 setup' }
     $Root = $PSScriptRoot
-    $Icon = Join-Path $Root 'src\audio_dedup\gui\assets\icon.ico'
+    $Icon = Join-Path $Root 'src\audio_dedup\gui\assets\app.ico'
     if (-not (Test-Path $Icon)) { throw "missing icon: $Icon" }
     # --specpath 会改变相对路径基准，数据文件与入口一律用绝对路径
     $Data = "$(Join-Path $Root 'src\audio_dedup\gui\assets');audio_dedup\gui\assets"

@@ -18,7 +18,7 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QIcon
+from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -71,10 +71,20 @@ def _icon_path():
     """图标真源：源码运行取包内 assets，打包运行取 PyInstaller 解包目录。"""
     here = os.path.dirname(os.path.abspath(__file__))
     for base in (here, os.path.join(getattr(sys, "_MEIPASS", "") or "", "audio_dedup", "gui")):
-        for name in ("icon.ico", "icon.png"):
+        for name in ("app.ico", "app.png"):
             candidate = os.path.join(base, "assets", name)
             if os.path.isfile(candidate):
                 return candidate
+    return ""
+
+
+def _brand_path():
+    """顶栏两行字标：源码运行取包内 assets，打包运行取解包目录。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for base in (here, os.path.join(getattr(sys, "_MEIPASS", "") or "", "audio_dedup", "gui")):
+        candidate = os.path.join(base, "assets", "brand.png")
+        if os.path.isfile(candidate):
+            return candidate
     return ""
 
 
@@ -189,10 +199,13 @@ class TaskRunner(QObject):
         self.finished.emit(code, label)
 
 
+APP_VERSION = "0.1.1"
+
+
 class MainWindow(QMainWindow):
     def __init__(self, workdir=None, ffmpeg="ffmpeg"):
         super().__init__()
-        self.setWindowTitle("音频重复识别工具  ·  Audio Dedup")
+        self.setWindowTitle("音频重复识别工具")
         self.resize(1560, 980)
         self.setStyleSheet(theme.QSS)
         icon = _icon_path()
@@ -245,6 +258,7 @@ class MainWindow(QMainWindow):
         lay.addLayout(self._make_body(), 1)
         self.status = QStatusBar()
         self.setStatusBar(self.status)
+        self.status.addPermanentWidget(QLabel(f"音频重复识别工具 | v{APP_VERSION}"))
         self.status.showMessage("就绪  ·  源库只读，任何处置都需逐次确认")
 
     def _make_topbar(self):
@@ -254,14 +268,19 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(18, 6, 18, 6)
         lay.setSpacing(10)
+        brand = QLabel()
+        bp = _brand_path()
+        if bp:
+            pm = QPixmap(bp)
+            if not pm.isNull():
+                brand.setPixmap(pm.scaledToHeight(34, Qt.SmoothTransformation))
+        brand.setObjectName("Brand")
         title = QLabel("音频重复识别工具")
         title.setObjectName("Title")
-        sub = QLabel("L1 字节级  ·  L2 音频级  ·  L3 感知疑似")
-        sub.setObjectName("Subtitle")
         tv = QVBoxLayout()
         tv.setSpacing(0)
         tv.addWidget(title)
-        tv.addWidget(sub)
+        lay.addWidget(brand)
         lay.addLayout(tv)
         lay.addSpacing(14)
         lay.addWidget(QLabel("工作目录"))
